@@ -1,0 +1,153 @@
+name: Release builds (CUDA / ROCm)
+
+# Builds prebuilt tarballs for targeted GPUs and attaches them to a Release.
+# Trigger manually (workflow_dispatch) with a tag, or automatically on tag push.
+#
+#   A100  -> CUDA sm_80 (NVIDIA Data Center / Ampere)
+#   R6000 -> ROCm gfx1100 (AMD RDNA3 workstation)
+#
+# RTX 5090 (sm_120) build is attached the same way; the prebuilt artifact for
+# v0.1.0-h3 was produced locally (see ONBOARDING) and attached via gh release.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build (leave empty to use GITHUB_REF)"
+        required: false
+
+env:
+  UBUNTU_VERSION: "24.04"
+
+jobs:
+  build-cuda:
+    name: CUDA (${{ matrix.target.label }}, ${{ matrix.target.arch }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - { label: a100, arch: "80", tag: "a100-cuda" }
+          - { label: rtx5090, arch: "120", tag: "rtx5090-cuda" }
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Configure CUDA environment
+        run: |
+          echo "NVIDIA_FAMILY=cc85" >> $GITHUB_ENV
+
+      - name: Install C++ / CMake deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake ninja-build wget
+
+      - name: Build (SD_CUDA, arch=${{ matrix.target.arch }})
+        run: |
+          mkdir build && cd build
+          cmake .. -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DSD_CUDA=ON \
+            -DCMAKE_CUDA_ARCHITECTURES=${{ matrix.target.arch }} \
+            -DSD_WEBP=OFF -DSD_WEBM=OFF
+          cmake --build . --config Release
+
+      - name: Stage tarball
+        run: |
+          mkdir -p dist/sd-cpp/bin
+          cp build/bin/sd-cli build/bin/sd-server dist/sd-cpp/bin/
+          printf 'stable-diffusion.cpp build (GPU %s / CUDA sm_%s)\n' \
+            "${{ matrix.target.label }}" "${{ matrix.target.arch }}" > dist/sd-cpp/README.txt
+          cd dist && tar czf ../stable-diffusion-cpp-${{ matrix.target.tag }}-linux-x64.tar.gz sd-cpp
+
+      - name: Upload to Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -n "${{ inputs.tag }}" ]; then REF="refs/tags/${{ inputs.tag }}"; else REF="${{ github.ref }}"; fi
+          TAG="${REF#refs/tags/}"
+          gh release upload "$TAG" \
+            stable-diffusion-cpp-${{ matrix.target.tag }}-linux-x64.tar.gz \
+            --clobber
+
+  build-rocm:
+    name: ROCm (${{ matrix.target.label }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - { label: r6000, gfx: "gfx1100", tag: "r6000-rocm" }
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet || true
+          sudo rm -rf /usr/local/lib/android || true
+          sudo rm -rf /opt/ghc || true
+          sudo rm -rf /usr/local/share/boost || true
+          docker system prune -af || true
+
+      - name: Setup TheRock with ROCm wheels
+        run: |
+          python3 -m venv .venv && source .venv/bin/activate
+          python -m pip install --upgrade pip
+          python -m pip install --index-url https://repo.amd.com/rocm/whl-multi-arch/ \
+            "rocm[libraries,devel]==7.14.0"
+          ROCM_PATH=$(rocm-sdk path --root)
+          CMAKE_PATH=$(rocm-sdk path --cmake)
+          BIN_PATH=$(rocm-sdk path --bin)
+          echo "ROCM_PATH=$ROCM_PATH" >> $GITHUB_ENV
+          echo "CMAKE_PREFIX_PATH=$CMAKE_PATH" >> $GITHUB_ENV
+          echo "HIP_PATH=$ROCM_PATH" >> $GITHUB_ENV
+          echo "PATH=$BIN_PATH:${PATH}" >> $GITHUB_ENV
+          echo "LD_LIBRARY_PATH=$ROCM_PATH/lib:${LD_LIBRARY_PATH:-}" >> $GITHUB_ENV
+          echo "$(pwd)/.venv/bin" >> $GITHUB_PATH
+
+      - name: Build (SD_HIPBLAS, gfx=${{ matrix.target.gfx }})
+        run: |
+          mkdir build && cd build
+          cmake .. -G Ninja \
+            -DCMAKE_HIP_COMPILER="$(hipconfig -l)/clang" \
+            -DCMAKE_HIP_FLAGS="-mllvm --amdgpu-unroll-threshold-local=600" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DSD_HIPBLAS=ON \
+            -DHIP_PLATFORM=amd \
+            -DGPU_TARGETS="${{ matrix.target.gfx }}" \
+            -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON \
+            -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+            -DCMAKE_INSTALL_RPATH='$ORIGIN' \
+            -DGGML_NATIVE=OFF \
+            -DSD_BUILD_SHARED_GGML_LIB=ON \
+            -DGGML_BACKEND_DL=ON \
+            -DGGML_CPU_ALL_VARIANTS=ON \
+            -DSD_BUILD_SHARED_LIBS=ON \
+            -DSD_WEBP=OFF -DSD_WEBM=OFF
+          cmake --build . --config Release
+
+      - name: Stage tarball
+        run: |
+          mkdir -p dist/sd-cpp/bin
+          cp build/bin/sd-cli build/bin/sd-server dist/sd-cpp/bin/
+          printf 'stable-diffusion.cpp build (GPU %s / ROCm %s)\n' \
+            "${{ matrix.target.label }}" "${{ matrix.target.gfx }}" > dist/sd-cpp/README.txt
+          cd dist && tar czf ../stable-diffusion-cpp-${{ matrix.target.tag }}-linux-x64.tar.gz sd-cpp
+
+      - name: Upload to Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -n "${{ inputs.tag }}" ]; then REF="refs/tags/${{ inputs.tag }}"; else REF="${{ github.ref }}"; fi
+          TAG="${REF#refs/tags/}"
+          gh release upload "$TAG" \
+            stable-diffusion-cpp-${{ matrix.target.tag }}-linux-x64.tar.gz \
+            --clobber
