@@ -17,3 +17,6 @@ preview.png
 CLAUDE.local.md
 .agents/
 .codex/
+# pixi environments
+.pixi/*
+!.pixi/config.toml

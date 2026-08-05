@@ -1,0 +1,17 @@
+[workspace]
+authors = ["yuki-inaho <yoshikawa@inaho.co>"]
+channels = ["nvidia", "conda-forge"]
+name = "stable-diffusion.cpp"
+platforms = ["linux-64"]
+version = "0.1.0"
+
+[tasks]
+build = "cmake -S . -B build -GNinja -DCMAKE_BUILD_TYPE=Release -DSD_CUDA=ON && cmake --build build"
+build-cpu = "cmake -S . -B build -GNinja -DCMAKE_BUILD_TYPE=Release && cmake --build build"
+
+[dependencies]
+cmake = ">=3.24"
+ninja = "*"
+cxx-compiler = "*"
+git = "*"
+cuda-toolkit = "==13.0.3"
