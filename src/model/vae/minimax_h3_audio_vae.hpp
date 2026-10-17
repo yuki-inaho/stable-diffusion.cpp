@@ -154,8 +154,9 @@ namespace MiniMaxH3 {
                          const String2TensorStorage& tensor_storage_map = {},
                          const std::string prefix                       = "") override {
             GGMLBlock::init_params(ctx, tensor_storage_map, prefix);
-            params["q_bias"] = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, in_channels);
-            params["v_bias"] = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, in_channels);
+            params["q_bias"]      = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, in_channels);
+            params["zero_k_bias"] = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, in_channels);
+            params["v_bias"]      = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, in_channels);
         }
 
         ggml_tensor* forward(GGMLRunnerContext* ctx, ggml_tensor* x) {
@@ -166,15 +167,14 @@ namespace MiniMaxH3 {
                 return ggml_reshape_4d(ctx->ggml_ctx, bias, bias->ne[0], 1, 1, 1);
             };
             auto q = ggml_add(ctx->ggml_ctx, qkv[0], bias_shape(params["q_bias"]));
-            auto k = qkv[1];
+            auto k = ggml_add(ctx->ggml_ctx, qkv[1], bias_shape(params["zero_k_bias"]));
             auto v = ggml_add(ctx->ggml_ctx, qkv[2], bias_shape(params["v_bias"]));
 
             int64_t sequence = x->ne[1];
             auto mask        = ggml_diag_mask_inf(ctx->ggml_ctx,
                                                   ggml_ext_zeros(ctx->ggml_ctx, sequence, sequence, 1, 1),
                                                   0);
-            auto attn_out    = ggml_ext_attention_ext(ctx->ggml_ctx,
-                                                      ctx->backend,
+            auto attn_out    = ggml_ext_attention_ext(ctx,
                                                       q,
                                                       k,
                                                       v,
@@ -358,17 +358,22 @@ namespace MiniMaxH3 {
         }
 
         ggml_tensor* encode(GGMLRunnerContext* ctx, ggml_tensor* waveform) {
-            GGML_ASSERT(waveform->ne[1] == 2);
+            GGML_ASSERT(waveform->ne[1] * waveform->ne[2] * waveform->ne[3] == 2);
             auto encoder   = std::dynamic_pointer_cast<AudioEncoder>(blocks["encoder"]);
             auto pre       = std::dynamic_pointer_cast<AudioAttentionProjection>(blocks["pre_block"]);
             auto mean_proj = std::dynamic_pointer_cast<LTXV::Conv1D>(blocks["mean_proj"]);
 
-            waveform = ggml_reshape_3d(ctx->ggml_ctx, waveform, waveform->ne[0], 1, waveform->ne[1]);
-            auto x   = encoder->forward(ctx, waveform);  // [B*S, 2048, T]
-            x        = ggml_cont(ctx->ggml_ctx, ggml_permute(ctx->ggml_ctx, x, 1, 0, 2, 3));
-            x        = pre->forward(ctx, x);
-            x        = ggml_cont(ctx->ggml_ctx, ggml_permute(ctx->ggml_ctx, x, 1, 0, 2, 3));
-            auto z   = mean_proj->forward(ctx, x);
+            const int64_t streams = waveform->ne[2] * waveform->ne[3];
+            waveform              = ggml_reshape_3d(ctx->ggml_ctx,
+                                                    waveform,
+                                                    waveform->ne[0],
+                                                    1,
+                                                    streams);
+            auto x                = encoder->forward(ctx, waveform);
+            x                     = ggml_cont(ctx->ggml_ctx, ggml_permute(ctx->ggml_ctx, x, 1, 0, 2, 3));
+            x                     = pre->forward(ctx, x);
+            x                     = ggml_cont(ctx->ggml_ctx, ggml_permute(ctx->ggml_ctx, x, 1, 0, 2, 3));
+            auto z                = mean_proj->forward(ctx, x);
 
             auto mean = ggml_reshape_4d(ctx->ggml_ctx, params["latents_mean"], 1, kLatentChannels, 1, 1);
             auto std  = ggml_reshape_4d(ctx->ggml_ctx, params["latents_std"], 1, kLatentChannels, 1, 1);
@@ -463,7 +468,7 @@ namespace MiniMaxH3 {
                 return graph;
             };
             auto result = restore_trailing_singleton_dims(
-                GGMLRunner::compute<float>(get_graph, n_threads, false, false, false),
+                GGMLRunner::compute(get_graph, n_threads, false),
                 4);
             int64_t t1 = ggml_time_ms();
             LOG_INFO("MiniMax-H3 audio VAE encode completed, taking %.2fs",
@@ -483,7 +488,7 @@ namespace MiniMaxH3 {
                 return graph;
             };
             auto result = restore_trailing_singleton_dims(
-                GGMLRunner::compute<float>(get_graph, n_threads, false, false, false),
+                GGMLRunner::compute(get_graph, n_threads, false),
                 4);
             int64_t t1 = ggml_time_ms();
             LOG_INFO("MiniMax-H3 audio VAE decode completed, taking %.2fs",
